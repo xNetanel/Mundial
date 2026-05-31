@@ -59,7 +59,7 @@ class Program
                 var now = DateTime.Now;
 
                 // ☀️ 08:00 - Fixtures
-                if (now.Hour == 8 && now.Minute == 0)
+                if (now.Hour == 12 && now.Minute == 0)
                 {
                     if (lastMorning.Date != now.Date)
                     {
@@ -69,7 +69,7 @@ class Program
                 }
 
                 // 🌙 23:59 - Results
-                if (now.Hour == 23 && now.Minute == 59)
+                if (now.Hour == 4 && now.Minute == 0)
                 {
                     if (lastEvening.Date != now.Date)
                     {
