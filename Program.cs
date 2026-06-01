@@ -59,7 +59,7 @@ class Program
                 var now = DateTime.Now;
 
                 // ☀️ 08:00 - Fixtures
-                if (now.Hour == 12 && now.Minute == 0)
+                if (now.Hour == 9 && now.Minute == 0)
                 {
                     if (lastMorning.Date != now.Date)
                     {
@@ -69,7 +69,7 @@ class Program
                 }
 
                 // 🌙 23:59 - Results
-                if (now.Hour == 4 && now.Minute == 0)
+                if (now.Hour == 21 && now.Minute == 0)
                 {
                     if (lastEvening.Date != now.Date)
                     {
@@ -98,7 +98,7 @@ class Program
         string today = DateTime.UtcNow.ToString("yyyy-MM-dd");
 
         var res = await http.GetStringAsync(
-            $"https://v3.football.api-sports.io/fixtures?date={today}"
+            $"https://v3.football.api-sports.io/fixtures?date={today}&league=10&season=2026"
         );
 
         var json = JObject.Parse(res);
@@ -135,7 +135,7 @@ class Program
         string today = DateTime.UtcNow.ToString("yyyy-MM-dd");
 
         var res = await http.GetStringAsync(
-            $"https://v3.football.api-sports.io/fixtures?date={today}"
+            $"https://v3.football.api-sports.io/fixtures?date={today}&league=10&season=2026"
         );
 
         var json = JObject.Parse(res);
