@@ -159,11 +159,92 @@ class Program
             int hg = m["goals"]?["home"]?.Value<int?>() ?? 0;
             int ag = m["goals"]?["away"]?.Value<int?>() ?? 0;
 
-            sb.AppendLine($"{GetFlag(m["teams"]["home"]["country"]?.ToString())} {home} {hg}-{ag} {away} {GetFlag(m["teams"]["away"]["country"]?.ToString())}");
+            int fixtureId = m["fixture"]?["id"]?.Value<int>() ?? 0;
+
+            string homeFlag = GetFlag(m["teams"]["home"]["country"]?.ToString());
+            string awayFlag = GetFlag(m["teams"]["away"]["country"]?.ToString());
+
+            sb.AppendLine($"{homeFlag} {home} {hg}-{ag} {away} {awayFlag}");
+            sb.AppendLine();
+
+            await AppendGoals(sb, http, fixtureId, home, away, homeFlag, awayFlag);
+
+            sb.AppendLine("━━━━━━━━━━━━━━━━━━━━");
             sb.AppendLine();
         }
 
         await SendLong(sb.ToString());
+    }
+
+    private async Task AppendGoals(
+    StringBuilder sb,
+    HttpClient http,
+    int fixtureId,
+    string homeTeam,
+    string awayTeam,
+    string homeFlag,
+    string awayFlag)
+    {
+        try
+        {
+            var eventsResponse = await http.GetStringAsync(
+                $"https://v3.football.api-sports.io/fixtures/events?fixture={fixtureId}");
+
+            var eventsJson = JObject.Parse(eventsResponse);
+            var events = eventsJson["response"];
+
+            bool foundGoal = false;
+
+            foreach (var ev in events)
+            {
+                string type = ev["type"]?.ToString();
+
+                if (type != "Goal")
+                    continue;
+
+                foundGoal = true;
+
+                int elapsed = ev["time"]?["elapsed"]?.Value<int>() ?? 0;
+                int extra = ev["time"]?["extra"]?.Value<int>() ?? 0;
+
+                string minute = extra > 0
+                    ? $"{elapsed}+{extra}'"
+                    : $"{elapsed}'";
+
+                string scorer =
+                    ev["player"]?["name"]?.ToString()
+                    ?? "Unknown";
+
+                string assist =
+                    ev["assist"]?["name"]?.ToString();
+
+                string team =
+                    ev["team"]?["name"]?.ToString();
+
+                string flag =
+                    team == homeTeam
+                        ? homeFlag
+                        : awayFlag;
+
+                sb.AppendLine($"🕒 {minute}");
+                sb.AppendLine($"⚽ {flag} {scorer}");
+
+                if (!string.IsNullOrWhiteSpace(assist))
+                    sb.AppendLine($"🎯 {assist}");
+
+                sb.AppendLine();
+            }
+
+            if (!foundGoal)
+            {
+                sb.AppendLine("😴 No goals scored");
+                sb.AppendLine();
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Events error: {ex.Message}");
+        }
     }
 
     // =========================
