@@ -2,17 +2,23 @@
 using System.Net.Http;
 using System.Text;
 using System.Threading.Tasks;
+using System.Collections.Generic;
+using System.Linq;
 using Newtonsoft.Json.Linq;
 using Discord;
 using Discord.WebSocket;
 
 class Program
 {
+    private static readonly HttpClient Http = new HttpClient();
+
     private DiscordSocketClient _client;
     private IMessageChannel _channel;
 
-    private DateTime lastMorning = DateTime.MinValue;
-    private DateTime lastEvening = DateTime.MinValue;
+    private DateTime _lastMorningSent = DateTime.MinValue;
+    private DateTime _lastEveningSent = DateTime.MinValue;
+
+    private const int FriendliesLeagueId = 10;
 
     static void Main(string[] args)
     {
@@ -22,8 +28,6 @@ class Program
 
     public async Task RunAsync()
     {
-        _client = new DiscordSocketClient();
-
         string discordToken = Environment.GetEnvironmentVariable("DISCORD_TOKEN");
         string apiKey = Environment.GetEnvironmentVariable("FOOTBALL_API_KEY");
 
@@ -35,196 +39,205 @@ class Program
             return;
         }
 
+        _client = new DiscordSocketClient();
+
         await _client.LoginAsync(TokenType.Bot, discordToken);
         await _client.StartAsync();
 
-        Console.WriteLine("🤖 Bot started (Cloud mode)");
+        Console.WriteLine("🤖 Bot started");
 
         await Task.Delay(5000);
 
         _channel = _client.GetChannel(channelId) as IMessageChannel;
-
         if (_channel == null)
         {
             Console.WriteLine("❌ Channel not found or no permission");
             return;
         }
 
-        await _channel.SendMessageAsync("🧪 Bot online (Cloud ready)");
+        await _channel.SendMessageAsync("🧪 Bot online");
 
         while (true)
         {
             try
             {
-                var now = DateTime.Now;
+                var now = DateTime.UtcNow;
 
-                // ☀️ 08:00 - Fixtures
-                if (now.Hour == 9 && now.Minute == 0)
+                // Morning: send today's fixtures once per UTC day
+                var morningRunTime = now.Date.AddHours(9); // 09:00 UTC
+                if (now >= morningRunTime && now < morningRunTime.AddMinutes(1))
                 {
-                    if (lastMorning.Date != now.Date)
+                    if (_lastMorningSent.Date != now.Date)
                     {
-                        await SendTodayFixtures(apiKey);
-                        lastMorning = now;
+                        await SendTodayFixtures(apiKey, now.Date);
+                        _lastMorningSent = now;
                     }
                 }
 
-                // 🌙 23:59 - Results
-                if (now.Hour == 21 && now.Minute == 0)
+                // Evening: send finished matches once per UTC day
+                var eveningRunTime = now.Date.AddHours(23).AddMinutes(59); // 23:59 UTC
+                if (now >= eveningRunTime && now < eveningRunTime.AddMinutes(1))
                 {
-                    if (lastEvening.Date != now.Date)
+                    if (_lastEveningSent.Date != now.Date)
                     {
-                        await SendDailySummary(apiKey);
-                        lastEvening = now;
+                        await SendDailySummary(apiKey, now.Date);
+                        _lastEveningSent = now;
                     }
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine("Error: " + ex.Message);
+                Console.WriteLine("Loop error: " + ex.Message);
             }
 
-            await Task.Delay(30000);
+            await Task.Delay(15000);
         }
     }
 
-    // =========================
-    // ☀️ MORNING FIXTURES
-    // =========================
-    private async Task SendTodayFixtures(string apiKey)
+    private async Task SendTodayFixtures(string apiKey, DateTime utcDate)
     {
-        var http = new HttpClient();
-        http.DefaultRequestHeaders.Add("x-apisports-key", apiKey);
+        var fixtures = await GetFriendlyFixturesForDateAsync(apiKey, utcDate);
 
-        string today = DateTime.UtcNow.ToString("yyyy-MM-dd");
-
-        var res = await http.GetStringAsync(
-            $"https://v3.football.api-sports.io/fixtures?date={today}&league=10&season=2026"
-        );
-
-        var json = JObject.Parse(res);
-        var matches = json["response"];
+        if (fixtures.Count == 0)
+        {
+            await _channel.SendMessageAsync(
+                "☀️ TODAY'S MATCHES\n━━━━━━━━━━━━━━━━━━━━\n\n😴 No friendly matches found for today (UTC).");
+            return;
+        }
 
         var sb = new StringBuilder();
-
         sb.AppendLine("☀️ TODAY'S MATCHES");
         sb.AppendLine("━━━━━━━━━━━━━━━━━━━━\n");
 
-        foreach (var m in matches)
+        foreach (var m in fixtures)
         {
-            string home = m["teams"]["home"]["name"]?.ToString();
-            string away = m["teams"]["away"]["name"]?.ToString();
+            string home = m["teams"]?["home"]?["name"]?.ToString() ?? "Unknown";
+            string away = m["teams"]?["away"]?["name"]?.ToString() ?? "Unknown";
 
-            string time = ToDiscordTime(m["fixture"]["date"]?.ToString());
+            string homeCountry = m["teams"]?["home"]?["country"]?.ToString();
+            string awayCountry = m["teams"]?["away"]?["country"]?.ToString();
 
-            sb.AppendLine($"{GetFlag(m["teams"]["home"]["country"]?.ToString())} {home} 🆚 {away} {GetFlag(m["teams"]["away"]["country"]?.ToString())}");
-            sb.AppendLine($"🕒 {time}");
+            string matchUtc = m["fixture"]?["date"]?.ToString();
+            string discordTime = ToDiscordRelativeTime(matchUtc);
+
+            sb.AppendLine($"{GetFlag(homeCountry)} {home} 🆚 {away} {GetFlag(awayCountry)}");
+            sb.AppendLine($"🕒 {discordTime}");
             sb.AppendLine();
         }
 
         await SendLong(sb.ToString());
     }
 
-    // =========================
-    // 🌙 DAILY SUMMARY
-    // =========================
-    private async Task SendDailySummary(string apiKey)
+    private async Task SendDailySummary(string apiKey, DateTime utcDate)
     {
-        var http = new HttpClient();
-        http.DefaultRequestHeaders.Add("x-apisports-key", apiKey);
+        var fixtures = await GetFriendlyFixturesForDateAsync(apiKey, utcDate);
 
-        string today = DateTime.UtcNow.ToString("yyyy-MM-dd");
-
-        var res = await http.GetStringAsync(
-            $"https://v3.football.api-sports.io/fixtures?date={today}&league=10&season=2026"
-        );
-
-        var json = JObject.Parse(res);
-        var matches = json["response"];
+        if (fixtures.Count == 0)
+        {
+            await _channel.SendMessageAsync(
+                "🌙 DAILY RESULTS\n━━━━━━━━━━━━━━━━━━━━\n\n😴 No friendly matches found for today (UTC).");
+            return;
+        }
 
         var sb = new StringBuilder();
-
         sb.AppendLine("🌙 DAILY RESULTS");
         sb.AppendLine("━━━━━━━━━━━━━━━━━━━━\n");
 
-        foreach (var m in matches)
-        {
-            string status = m["fixture"]["status"]["short"]?.ToString();
+        bool foundAnyFinished = false;
 
+        foreach (var m in fixtures)
+        {
+            string status = m["fixture"]?["status"]?["short"]?.ToString();
+
+            // FT = finished. If you also want AET / PEN, add them here.
             if (status != "FT")
                 continue;
 
-            string home = m["teams"]["home"]["name"]?.ToString();
-            string away = m["teams"]["away"]["name"]?.ToString();
+            foundAnyFinished = true;
 
-            int hg = m["goals"]?["home"]?.Value<int?>() ?? 0;
-            int ag = m["goals"]?["away"]?.Value<int?>() ?? 0;
+            string home = m["teams"]?["home"]?["name"]?.ToString() ?? "Unknown";
+            string away = m["teams"]?["away"]?["name"]?.ToString() ?? "Unknown";
+
+            int homeGoals = m["goals"]?["home"]?.Value<int?>() ?? 0;
+            int awayGoals = m["goals"]?["away"]?.Value<int?>() ?? 0;
 
             int fixtureId = m["fixture"]?["id"]?.Value<int>() ?? 0;
 
-            string homeFlag = GetFlag(m["teams"]["home"]["country"]?.ToString());
-            string awayFlag = GetFlag(m["teams"]["away"]["country"]?.ToString());
+            string homeCountry = m["teams"]?["home"]?["country"]?.ToString();
+            string awayCountry = m["teams"]?["away"]?["country"]?.ToString();
 
-            sb.AppendLine($"{homeFlag} {home} {hg}-{ag} {away} {awayFlag}");
+            string homeFlag = GetFlag(homeCountry);
+            string awayFlag = GetFlag(awayCountry);
+
+            sb.AppendLine($"{homeFlag} {home} {homeGoals}-{awayGoals} {away} {awayFlag}");
             sb.AppendLine();
 
-            await AppendGoals(sb, http, fixtureId, home, away, homeFlag, awayFlag);
+            await AppendGoals(sb, apiKey, fixtureId, home, away, homeFlag, awayFlag);
 
             sb.AppendLine("━━━━━━━━━━━━━━━━━━━━");
             sb.AppendLine();
+        }
+
+        if (!foundAnyFinished)
+        {
+            sb.AppendLine("😴 No finished matches yet.");
         }
 
         await SendLong(sb.ToString());
     }
 
     private async Task AppendGoals(
-    StringBuilder sb,
-    HttpClient http,
-    int fixtureId,
-    string homeTeam,
-    string awayTeam,
-    string homeFlag,
-    string awayFlag)
+        StringBuilder sb,
+        string apiKey,
+        int fixtureId,
+        string homeTeam,
+        string awayTeam,
+        string homeFlag,
+        string awayFlag)
     {
         try
         {
-            var eventsResponse = await http.GetStringAsync(
-                $"https://v3.football.api-sports.io/fixtures/events?fixture={fixtureId}");
+            string url = $"https://v3.football.api-sports.io/fixtures/events?fixture={fixtureId}";
+            string responseText = await SendApiRequestAsync(apiKey, url);
 
-            var eventsJson = JObject.Parse(eventsResponse);
-            var events = eventsJson["response"];
+            var json = JObject.Parse(responseText);
+            var events = json["response"] as JArray ?? new JArray();
 
-            bool foundGoal = false;
+            var goalEvents = new List<JObject>();
 
             foreach (var ev in events)
             {
                 string type = ev["type"]?.ToString();
+                if (type == "Goal")
+                    goalEvents.Add((JObject)ev);
+            }
 
-                if (type != "Goal")
-                    continue;
+            if (goalEvents.Count == 0)
+            {
+                sb.AppendLine("😴 No goals scored");
+                sb.AppendLine();
+                return;
+            }
 
-                foundGoal = true;
-
+            foreach (var ev in goalEvents.OrderBy(e => e["time"]?["elapsed"]?.Value<int>() ?? 0)
+                                          .ThenBy(e => e["time"]?["extra"]?.Value<int?>() ?? 0))
+            {
                 int elapsed = ev["time"]?["elapsed"]?.Value<int>() ?? 0;
                 int extra = ev["time"]?["extra"]?.Value<int>() ?? 0;
 
-                string minute = extra > 0
-                    ? $"{elapsed}+{extra}'"
-                    : $"{elapsed}'";
+                string minute = extra > 0 ? $"{elapsed}+{extra}'" : $"{elapsed}'";
 
-                string scorer =
-                    ev["player"]?["name"]?.ToString()
-                    ?? "Unknown";
+                string scorer = ev["player"]?["name"]?.ToString() ?? "Unknown";
+                string assist = ev["assist"]?["name"]?.ToString();
 
-                string assist =
-                    ev["assist"]?["name"]?.ToString();
-
-                string team =
-                    ev["team"]?["name"]?.ToString();
+                string team = ev["team"]?["name"]?.ToString() ?? "";
 
                 string flag =
-                    team == homeTeam
+                    string.Equals(team, homeTeam, StringComparison.OrdinalIgnoreCase)
                         ? homeFlag
-                        : awayFlag;
+                        : string.Equals(team, awayTeam, StringComparison.OrdinalIgnoreCase)
+                            ? awayFlag
+                            : "";
 
                 sb.AppendLine($"🕒 {minute}");
                 sb.AppendLine($"⚽ {flag} {scorer}");
@@ -234,36 +247,70 @@ class Program
 
                 sb.AppendLine();
             }
-
-            if (!foundGoal)
-            {
-                sb.AppendLine("😴 No goals scored");
-                sb.AppendLine();
-            }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"Events error: {ex.Message}");
+            Console.WriteLine($"Events error for fixture {fixtureId}: {ex.Message}");
+            sb.AppendLine("⚠️ Could not load goals for this match");
+            sb.AppendLine();
         }
     }
 
-    // =========================
-    // ⏱ DISCORD TIME
-    // =========================
-    private string ToDiscordTime(string utcTime)
+    private async Task<JArray> GetFriendlyFixturesForDateAsync(string apiKey, DateTime utcDate)
+    {
+        string date = utcDate.ToString("yyyy-MM-dd");
+
+        // Try a few seasons so you do not miss friendlies that are not under the exact current season.
+        var seasonsToTry = new[]
+        {
+            utcDate.Year,
+            utcDate.Year - 1,
+            utcDate.Year + 1
+        };
+
+        foreach (int season in seasonsToTry.Distinct())
+        {
+            string url =
+                $"https://v3.football.api-sports.io/fixtures?date={date}&league={FriendliesLeagueId}&season={season}";
+
+            string responseText = await SendApiRequestAsync(apiKey, url);
+
+            var json = JObject.Parse(responseText);
+            var response = json["response"] as JArray ?? new JArray();
+
+            if (response.Count > 0)
+                return response;
+        }
+
+        return new JArray();
+    }
+
+    private async Task<string> SendApiRequestAsync(string apiKey, string url)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.Add("x-apisports-key", apiKey);
+
+        using var response = await Http.SendAsync(request);
+        string body = await response.Content.ReadAsStringAsync();
+
+        if (!response.IsSuccessStatusCode)
+            Console.WriteLine($"API HTTP {(int)response.StatusCode}: {body}");
+
+        return body;
+    }
+
+    private string ToDiscordRelativeTime(string utcTime)
     {
         if (string.IsNullOrWhiteSpace(utcTime))
             return "?";
 
-        DateTime utc = DateTime.Parse(utcTime).ToUniversalTime();
-        long unix = ((DateTimeOffset)utc).ToUnixTimeSeconds();
+        if (!DateTimeOffset.TryParse(utcTime, out var dto))
+            return "?";
 
+        long unix = dto.ToUnixTimeSeconds();
         return $"<t:{unix}:R>";
     }
 
-    // =========================
-    // 🌍 FLAGS (GLOBAL SAFE)
-    // =========================
     private string GetFlag(string country)
     {
         if (string.IsNullOrWhiteSpace(country))
@@ -272,41 +319,84 @@ class Program
         country = country.Trim();
 
         if (country.Length == 2)
-        {
-            country = country.ToUpper();
+            return Iso2ToFlag(country.ToUpperInvariant());
 
-            return char.ConvertFromUtf32(country[0] + 0x1F1A5) +
-                   char.ConvertFromUtf32(country[1] + 0x1F1A5);
-        }
-
-        return country switch
-        {
-            "Argentina" => "🇦🇷",
-            "Brazil" => "🇧🇷",
-            "France" => "🇫🇷",
-            "Germany" => "🇩🇪",
-            "Spain" => "🇪🇸",
-            "Italy" => "🇮🇹",
-            "England" => "🇬🇧",
-
-            "USA" or "United States" => "🇺🇸",
-            "Mexico" => "🇲🇽",
-            "Canada" => "🇨🇦",
-
-            "Japan" => "🇯🇵",
-            "South Korea" or "Korea Republic" => "🇰🇷",
-
-            "Morocco" => "🇲🇦",
-            "Senegal" => "🇸🇳",
-            "Nigeria" => "🇳🇬",
-
-            _ => ""
-        };
+        return CountryToIso2.TryGetValue(country, out string iso2)
+            ? Iso2ToFlag(iso2)
+            : "";
     }
 
-    // =========================
-    // 📩 SAFE SENDER
-    // =========================
+    private string Iso2ToFlag(string iso2)
+    {
+        if (string.IsNullOrWhiteSpace(iso2) || iso2.Length != 2)
+            return "";
+
+        char a = char.ToUpperInvariant(iso2[0]);
+        char b = char.ToUpperInvariant(iso2[1]);
+
+        if (a < 'A' || a > 'Z' || b < 'A' || b > 'Z')
+            return "";
+
+        return char.ConvertFromUtf32(0x1F1E6 + (a - 'A')) +
+               char.ConvertFromUtf32(0x1F1E6 + (b - 'A'));
+    }
+
+    private static readonly Dictionary<string, string> CountryToIso2 = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["Algeria"] = "DZ",
+        ["Argentina"] = "AR",
+        ["Australia"] = "AU",
+        ["Austria"] = "AT",
+        ["Belgium"] = "BE",
+        ["Bosnia and Herzegovina"] = "BA",
+        ["Brazil"] = "BR",
+        ["Canada"] = "CA",
+        ["Cape Verde"] = "CV",
+        ["Colombia"] = "CO",
+        ["Croatia"] = "HR",
+        ["Curacao"] = "CW",
+        ["Curaçao"] = "CW",
+        ["Czech Republic"] = "CZ",
+        ["Democratic Republic of the Congo"] = "CD",
+        ["DR Congo"] = "CD",
+        ["Ecuador"] = "EC",
+        ["Egypt"] = "EG",
+        ["England"] = "GB",
+        ["France"] = "FR",
+        ["Germany"] = "DE",
+        ["Ghana"] = "GH",
+        ["Haiti"] = "HT",
+        ["Iran"] = "IR",
+        ["Iraq"] = "IQ",
+        ["Ivory Coast"] = "CI",
+        ["Japan"] = "JP",
+        ["Jordan"] = "JO",
+        ["Mexico"] = "MX",
+        ["Morocco"] = "MA",
+        ["Netherlands"] = "NL",
+        ["New Zealand"] = "NZ",
+        ["Norway"] = "NO",
+        ["Panama"] = "PA",
+        ["Paraguay"] = "PY",
+        ["Portugal"] = "PT",
+        ["Qatar"] = "QA",
+        ["Saudi Arabia"] = "SA",
+        ["Scotland"] = "GB",
+        ["Senegal"] = "SN",
+        ["South Africa"] = "ZA",
+        ["South Korea"] = "KR",
+        ["Korea Republic"] = "KR",
+        ["Spain"] = "ES",
+        ["Sweden"] = "SE",
+        ["Switzerland"] = "CH",
+        ["Tunisia"] = "TN",
+        ["Turkey"] = "TR",
+        ["United States"] = "US",
+        ["USA"] = "US",
+        ["Uruguay"] = "UY",
+        ["Uzbekistan"] = "UZ"
+    };
+
     private async Task SendLong(string text)
     {
         const int max = 1900;
